@@ -1,5 +1,4 @@
 // @ts-nocheck
-'use client'
 import { useState, useEffect } from 'react';
 
 const CheckIn = () => {
@@ -68,7 +67,7 @@ const CheckIn = () => {
   };
 
   return (
-    <div className="max-w-sm mx-auto p-4 mt-32">
+    <div className="max-w-sm mx-auto p-4">
       <div className="flex gap-2 mb-4">
         <input
           type="email"
@@ -76,6 +75,7 @@ const CheckIn = () => {
           onChange={(e) => setEmail(e.target.value)}
           onKeyPress={(e) => e.key === 'Enter' && addCheckin()}
           placeholder="Enter email"
+          autoComplete="off"
           className="flex-1 p-2 border-2 border-gray-500 rounded focus:border-blue-500 focus:outline-none"
         />
         <button
