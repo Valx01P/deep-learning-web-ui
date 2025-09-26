@@ -16,7 +16,7 @@ interface Player {
   isAllIn: boolean;
 }
 
-type GamePhase = 'preflop' | 'flop' | 'turn' | 'river' | 'showdown';
+type GamePhase = 'preflop' | 'flop' | 'turn' | 'river' | 'showdown' | 'gameover';
 
 function Poker() {
   const [players, setPlayers] = useState<Player[]>([
@@ -57,6 +57,11 @@ function Poker() {
   const [customBetAmount, setCustomBetAmount] = useState('');
   const [winnerAnimation, setWinnerAnimation] = useState<{playerId: number, amount: number} | null>(null);
 
+  // ── New endgame state ────────────────────────────────────────────────────────
+  const [gameOver, setGameOver] = useState(false);
+  const [finalWinnerId, setFinalWinnerId] = useState<number | null>(null);
+  const totalBank = 1000; // 500 + 500 (reset preserves this)
+
   const smallBlind = 5;
   const bigBlind = 10;
   const quickBetAmounts = [10, 20, 50, 100, 200];
@@ -75,9 +80,7 @@ function Poker() {
   const getMinRaise = () => {
     const callAmount = getCallAmount();
     const maxBet = getMaxBet();
-    // If no one has bet yet, minimum bet is $5
     if (maxBet === 0) return 5;
-    // Otherwise, minimum raise is call amount + size of the current highest bet
     return callAmount + maxBet;
   };
 
@@ -85,15 +88,12 @@ function Poker() {
     const currentPlayer = getCurrentPlayer();
     const callAmount = getCallAmount();
     const minRaise = getMinRaise();
-    // If trying to bet less than call amount, just call
     if (amount <= callAmount) {
       return Math.min(callAmount, currentPlayer.balance);
     }
-    // If trying to raise but less than minimum, make it minimum
     if (amount < minRaise) {
       return Math.min(minRaise, currentPlayer.balance);
     }
-    // Otherwise, cap at balance
     return Math.min(amount, currentPlayer.balance);
   };
 
@@ -167,19 +167,15 @@ function Poker() {
     }
   }, [gameStarted]);
 
-  // ⤵️ Auto-default the input value:
-  // - If there is a bet to face (callAmount > 0) and opponent is not all-in → set to Min Raise
-  // - Otherwise → set to 5 (table minimum bet)
+  // Auto-default the input value
   useEffect(() => {
     const me = getCurrentPlayer();
     const opp = getOpponent();
-    const canAct =
-      gamePhase !== 'showdown' && me && !me.hasFolded && !me.isAllIn;
-
-    if (!canAct) return;
+    const canActNow = gamePhase !== 'showdown' && gamePhase !== 'gameover' && me && !me.hasFolded && !me.isAllIn;
+    if (!canActNow) return;
 
     if (opp && opp.isAllIn && !opp.hasFolded) {
-      setCustomBetAmount(''); // only call/fold allowed
+      setCustomBetAmount('');
       return;
     }
 
@@ -193,6 +189,8 @@ function Poker() {
   }, [currentPlayerIndex, gamePhase, players, handNumber]);
 
   const handleAction = (actionType: string, amount: number = 0) => {
+    if (gameOver) return;
+
     const player = getCurrentPlayer();
     const opponent = getOpponent();
     const callAmount = getCallAmount();
@@ -296,6 +294,8 @@ function Poker() {
   };
 
   const checkBettingRoundComplete = (currentPlayers: Player[]) => {
+    if (gameOver) return;
+
     const activePlayers = currentPlayers.filter(p => !p.hasFolded);
     const playersWhoCanAct = activePlayers.filter(p => !p.isAllIn);
     const maxBet = Math.max(...currentPlayers.map(p => p.currentBet));
@@ -402,51 +402,77 @@ function Poker() {
     }
   };
 
+  // ── Endgame check helper ────────────────────────────────────────────────────
+  const checkForFinalWin = (updatedPlayers: Player[]) => {
+    const champ = updatedPlayers.find(p => p.balance >= totalBank);
+    if (champ) {
+      setGameOver(true);
+      setFinalWinnerId(champ.id);
+      setGamePhase('gameover');
+      return true;
+    }
+    return false;
+  };
+
   const awardPot = (winnerId: number) => {
+    if (gameOver) return;
+
     const winner = players.find(p => p.id === winnerId);
     if (!winner) return;
 
-    let winAmount = currentPot;
-    
+    const winAmount = currentPot;
+
+    // Build updated players with pot assigned
+    const updatedPlayers = players.map(p =>
+      p.id === winnerId ? { ...p, balance: p.balance + winAmount } : p
+    );
+
     setWinnerAnimation({ playerId: winnerId, amount: winAmount });
-    
-    setPlayers(prev => prev.map(p => 
-      p.id === winnerId 
-        ? { ...p, balance: p.balance + winAmount }
-        : p
-    ));
-    
+    setPlayers(updatedPlayers);
+    setCurrentPot(0);
     setLastAction(`${winner.name} wins $${winAmount}!`);
-    
+
     setTimeout(() => {
       setWinnerAnimation(null);
-      nextHand();
+      // If someone now has all the money, stop the game.
+      if (!checkForFinalWin(updatedPlayers)) {
+        nextHand();
+      }
     }, 3000);
   };
 
   const splitPot = () => {
+    if (gameOver) return;
+
     const activePlayers = players.filter(p => !p.hasFolded);
     const splitAmount = Math.floor(currentPot / activePlayers.length);
     const remainder = currentPot % activePlayers.length;
     
-    setPlayers(prev => prev.map(p => {
+    const updatedPlayers = players.map(p => {
       const activePlayerIndex = activePlayers.findIndex(ap => ap.id === p.id);
       if (activePlayerIndex !== -1) {
         const bonus = activePlayerIndex === 0 ? remainder : 0;
         return { ...p, balance: p.balance + splitAmount + bonus };
       }
       return p;
-    }));
+    });
+
+    setPlayers(updatedPlayers);
+    setCurrentPot(0);
     
     const playerNames = activePlayers.map(p => p.name).join(' & ');
     setLastAction(`Split pot! ${playerNames} each win $${splitAmount}${remainder > 0 ? ` (+$${remainder} to ${activePlayers[0].name})` : ''}!`);
     
     setTimeout(() => {
-      nextHand();
+      // Unlikely to be game over after a split, but check anyway.
+      if (!checkForFinalWin(updatedPlayers)) {
+        nextHand();
+      }
     }, 3000);
   };
 
   const nextHand = () => {
+    if (gameOver) return;
     setCurrentPot(0);
     setHandNumber(prev => prev + 1);
     setGamePhase('preflop');
@@ -479,13 +505,21 @@ function Poker() {
     setLastAction('');
     setCustomBetAmount('');
     setWinnerAnimation(null);
+    setGameOver(false);
+    setFinalWinnerId(null);
   };
 
   const activePlayers = getActivePlayers();
   const currentPlayer = getCurrentPlayer();
   const opponent = getOpponent();
   const callAmount = getCallAmount();
-  const canAct = gamePhase !== 'showdown' && currentPlayer && !currentPlayer.hasFolded && !currentPlayer.isAllIn;
+  const canAct =
+    !gameOver &&
+    gamePhase !== 'showdown' &&
+    currentPlayer &&
+    !currentPlayer.hasFolded &&
+    !currentPlayer.isAllIn;
+
   const minRaise = getMinRaise();
   const isOpponentAllIn = opponent && opponent.isAllIn && !opponent.hasFolded;
 
@@ -495,14 +529,12 @@ function Poker() {
     const options = [];
     const maxBet = getMaxBet();
     
-    // Can always fold
     options.push({
       action: 'fold',
       label: 'FOLD',
       className: 'bg-red-600 hover:bg-red-700'
     });
     
-    // Check or Call
     if (callAmount === 0) {
       options.push({
         action: 'check',
@@ -562,14 +594,18 @@ function Poker() {
   const handleCustomBet = () => {
     const amount = parseInt(customBetAmount);
     if (isNaN(amount) || amount <= 0) return;
-    if (isOpponentAllIn) return; // no raises when opp is all-in
+    if (isOpponentAllIn) return;
     handleAction(callAmount > 0 ? 'raise' : 'bet', amount);
   };
 
   const actionOptions = getActionOptions();
 
+  // ── Winner overlay (game over screen) ───────────────────────────────────────
+  const finalWinner = finalWinnerId ? players.find(p => p.id === finalWinnerId) : null;
+  const bankrupt = finalWinnerId ? players.find(p => p.id !== finalWinnerId) : null;
+
   return (
-    <div className="min-h-screen bg-gray-800 p-2 overflow-hidden">
+    <div className="min-h-screen bg-gray-800 px-2 overflow-hidden">
       <div className="max-w-4xl mx-auto h-screen flex flex-col">
         {/* Compact Header */}
         <div className="h-[23dvh] bg-gray-900 rounded-t-lg p-3 shadow-lg flex-shrink-0">
@@ -580,7 +616,7 @@ function Poker() {
               </div>
               <div>
                 <h1 className="text-lg font-bold text-white">Poker Cash Game</h1>
-                <p className="text-gray-400 text-sm">${smallBlind}/${bigBlind} Hold'em</p>
+                <p className="text-gray-400 text-sm">${smallBlind}/${bigBlind} Hold&apos;em</p>
               </div>
             </div>
             <div className="flex gap-2">
@@ -613,201 +649,225 @@ function Poker() {
             </div>
             <div className="bg-gray-800 rounded p-2">
               <div className="text-gray-400 text-xs">To Call</div>
-              <div className="text-red-500 text-sm font-bold">${callAmount}</div>
+              <div className="text-red-500 text-sm font-bold">${getCallAmount()}</div>
             </div>
           </div>
 
           {/* Status */}
-          {lastAction && (
+          {lastAction && !gameOver && (
             <div className="mt-2 bg-gray-800 rounded p-2 text-center">
               <div className="text-gray-400 text-sm">{lastAction}</div>
             </div>
           )}
         </div>
 
-        {/* Players - Maintains Fixed Height */}
-        <div className="h-[27dvh] bg-green-800 p-3 flex-shrink-0">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 h-full">
-            {players.map((player, index) => (
-              <div
-                key={player.id}
-                className={`bg-gray-900 rounded-lg p-3 shadow-lg border-2 transition-all duration-200 relative ${
-                  currentPlayerIndex === index && canAct
-                    ? 'border-green-400 shadow-green-400/50'
-                    : player.hasFolded
-                    ? 'border-red-500 opacity-60'
-                    : player.isAllIn
-                    ? 'border-purple-500'
-                    : 'border-gray-700'
-                }`}
-              >
-                {winnerAnimation && winnerAnimation.playerId === player.id && (
-                  <div className="absolute -top-2 -right-2 bg-yellow-500 text-black px-2 py-1 rounded-full text-sm font-bold animate-bounce">
-                    +${winnerAnimation.amount}
-                  </div>
-                )}
-                
-                <div className="flex justify-between items-start mb-2">
-                  <div>
-                    <h3 className="text-lg font-bold text-white">{player.name}</h3>
-                    <div className="flex flex-wrap gap-1">
-                      {getPlayerStatusBadges(player, index)}
-                    </div>
-                  </div>
-                </div>
-                
-                <div className="space-y-2">
-                  {showBalances && (
-                    <div className="flex justify-between items-center bg-gray-800 rounded p-2">
-                      <span className="text-gray-300 text-sm">Balance:</span>
-                      <span className="text-green-400 font-bold">${player.balance}</span>
-                    </div>
-                  )}
-                  <div className="flex justify-between items-center bg-gray-800 rounded p-2">
-                    <span className="text-gray-300 text-sm">Current Bet:</span>
-                    <span className="text-red-500 font-bold">${player.currentBet}</span>
-                  </div>
-                </div>
-              </div>
-            ))}
+        {/* Game Over Screen */}
+        {gameOver ? (
+          <div className="flex-1 bg-gray-900 p-6 flex flex-col items-center justify-center text-center gap-4">
+            <Trophy className="w-14 h-14 text-yellow-400" />
+            <h2 className="text-3xl md:text-4xl font-extrabold text-white">
+              {finalWinner?.name} has ALL the money!
+            </h2>
+            <p className="text-green-400 text-xl font-bold">
+              Bankroll: ${finalWinner?.balance} / ${totalBank}
+            </p>
+            {bankrupt && (
+              <p className="text-gray-300 text-lg">
+                Sorry {bankrupt.name}… you&apos;re <span className="text-red-400 font-bold">bankrupt</span> 💀
+              </p>
+            )}
+            <button
+              onClick={resetGame}
+              className="mt-4 bg-yellow-500 hover:bg-yellow-600 text-black px-6 py-3 rounded-xl font-bold shadow"
+            >
+              Play Again
+            </button>
           </div>
-        </div>
-
-        {/* Controls - Compact */}
-        {canAct && actionOptions && (
-          <div className="h-[50dvh] bg-gray-900 p-3 flex-shrink-0">
-            <div className="text-center mb-3">
-              <h3 className="text-lg font-bold text-white flex items-center justify-center gap-1">
-                <Target className="text-green-400 w-4 h-4" />
-                {currentPlayer.name}'s Turn
-              </h3>
-              {isOpponentAllIn && (
-                <p className="text-yellow-400 text-sm mt-1">Opponent is ALL-IN - You can only FOLD or CALL</p>
-              )}
-            </div>
-            
-            {/* Quick Bets & Custom Input - Only show if opponent is NOT all-in */}
-            {!isOpponentAllIn && (
-              <div className="mb-3">
-                <div className="flex flex-wrap justify-center gap-2 mb-2">
-                  {/* Min Raise Button */}
-                  {currentPlayer.balance >= minRaise && (
-                    <button
-                      onClick={() => setCustomBetAmount(minRaise.toString())}
-                      className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm font-semibold border-2 border-blue-400"
-                    >
-                      Min Raise ${minRaise}
-                    </button>
-                  )}
-                  
-                  {quickBetAmounts.map(amount => {
-                    const isDisabled = amount > currentPlayer.balance || amount < minRaise;
-                    return (
-                      <button
-                        key={amount}
-                        onClick={() => setCustomBetAmount(amount.toString())}
-                        disabled={isDisabled}
-                        className={`px-3 py-1 rounded text-sm font-semibold ${
-                          isDisabled 
-                            ? 'bg-gray-600 text-gray-400 cursor-not-allowed' 
-                            : 'bg-yellow-600 hover:bg-yellow-700 text-white'
-                        }`}
-                      >
-                        ${amount}
-                      </button>
-                    );
-                  })}
-                  
-                  {currentPlayer.balance > callAmount && (
-                    <button
-                      onClick={() => setCustomBetAmount(currentPlayer.balance.toString())}
-                      className="bg-purple-600 hover:bg-purple-700 text-white px-3 py-1 rounded text-sm font-semibold"
-                    >
-                      All-In ${currentPlayer.balance}
-                    </button>
-                  )}
-                </div>
-                
-                {/* Custom Bet Input */}
-                <div className="flex justify-center gap-2">
-                  <input
-                    type="number"
-                    inputMode="numeric"
-                    min={callAmount > 0 ? minRaise : 5}
-                    value={customBetAmount}
-                    onChange={(e) => setCustomBetAmount(e.target.value.replace(/[^0-9]/g, ''))}
-                    placeholder={callAmount > 0 ? `Min Raise: ${minRaise}` : '5'}
-                    className="bg-gray-800 text-white px-3 py-1 rounded text-sm w-32 text-center"
-                  />
-                  <button
-                    onClick={handleCustomBet}
-                    disabled={
-                      !customBetAmount ||
-                      parseInt(customBetAmount) < (callAmount > 0 ? minRaise : 5) ||
-                      parseInt(customBetAmount) > currentPlayer.balance
-                    }
-                    className={`px-3 py-1 rounded text-sm ${
-                      !customBetAmount ||
-                      parseInt(customBetAmount) < (callAmount > 0 ? minRaise : 5) ||
-                      parseInt(customBetAmount) > currentPlayer.balance
-                        ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
-                        : 'bg-yellow-600 hover:bg-yellow-700 text-white'
+        ) : (
+          <>
+            {/* Players - Maintains Fixed Height */}
+            <div className="h-[27dvh] bg-green-800 p-3 flex-shrink-0">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 h-full">
+                {players.map((player, index) => (
+                  <div
+                    key={player.id}
+                    className={`bg-gray-900 rounded-lg p-3 shadow-lg border-2 transition-all duration-200 relative ${
+                      currentPlayerIndex === index && canAct
+                        ? 'border-green-400 shadow-green-400/50'
+                        : player.hasFolded
+                        ? 'border-red-500 opacity-60'
+                        : player.isAllIn
+                        ? 'border-purple-500'
+                        : 'border-gray-700'
                     }`}
                   >
-                    {callAmount > 0 ? 'Raise' : 'Bet'}
-                  </button>
+                    {winnerAnimation && winnerAnimation.playerId === player.id && (
+                      <div className="absolute -top-2 -right-2 bg-yellow-500 text-black px-2 py-1 rounded-full text-sm font-bold animate-bounce">
+                        +${winnerAnimation.amount}
+                      </div>
+                    )}
+                    
+                    <div className="flex justify-between items-start mb-2">
+                      <div>
+                        <h3 className="text-lg font-bold text-white">{player.name}</h3>
+                        <div className="flex flex-wrap gap-1">
+                          {getPlayerStatusBadges(player, index)}
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div className="space-y-2">
+                      {showBalances && (
+                        <div className="flex justify-between items-center bg-gray-800 rounded p-2">
+                          <span className="text-gray-300 text-sm">Balance:</span>
+                          <span className="text-green-400 font-bold">${player.balance}</span>
+                        </div>
+                      )}
+                      <div className="flex justify-between items-center bg-gray-800 rounded p-2">
+                        <span className="text-gray-300 text-sm">Current Bet:</span>
+                        <span className="text-red-500 font-bold">${player.currentBet}</span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Controls / Showdown */}
+            {gamePhase === 'showdown' ? (
+              <div className="h-[50dvh] bg-gray-900 p-3 flex-shrink-0 flex flex-col justify-center">
+                <div className="text-center mb-4">
+                  <h3 className="text-lg font-bold text-white flex items-center justify-center gap-2 mb-2">
+                    <Trophy className="text-yellow-400 w-5 h-5" />
+                    Select the Winner
+                  </h3>
+                  <p className="text-gray-300 text-sm">Total Pot: <span className="text-green-400 font-bold">${currentPot}</span></p>
+                  <p className="text-gray-400 text-xs mt-1">Click on the player who won the hand or choose tie</p>
+                </div>
+                
+                <div className="flex justify-center gap-3 flex-wrap">
+                  {activePlayers.map(player => (
+                    <button
+                      key={player.id}
+                      onClick={() => awardPot(player.id)}
+                      className="bg-yellow-500 hover:bg-yellow-600 text-black px-6 py-2 rounded-lg font-bold transition-colors"
+                    >
+                      {player.name} WINS
+                    </button>
+                  ))}
+                  
+                  {activePlayers.length >= 2 && (
+                    <button
+                      onClick={splitPot}
+                      className="bg-yellow-500 hover:bg-yellow-600 text-black px-6 py-2 rounded-lg font-bold transition-colors"
+                    >
+                      TIE - SPLIT POT
+                    </button>
+                  )}
                 </div>
               </div>
+            ) : (
+              canAct && (
+                <div className="h-[50dvh] bg-gray-900 p-3 flex-shrink-0">
+                  <div className="text-center mb-3">
+                    <h3 className="text-lg font-bold text-white flex items-center justify-center gap-1">
+                      <Target className="text-green-400 w-4 h-4" />
+                      {currentPlayer.name}&apos;s Turn
+                    </h3>
+                    {isOpponentAllIn && (
+                      <p className="text-yellow-400 text-sm mt-1">Opponent is ALL-IN - You can only FOLD or CALL</p>
+                    )}
+                  </div>
+                  
+                  {/* Quick Bets & Custom Input - Only show if opponent is NOT all-in */}
+                  {!isOpponentAllIn && (
+                    <div className="mb-3">
+                      <div className="flex flex-wrap justify-center gap-2 mb-2">
+                        {currentPlayer.balance >= minRaise && (
+                          <button
+                            onClick={() => setCustomBetAmount(minRaise.toString())}
+                            className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm font-semibold border-2 border-blue-400"
+                          >
+                            Min Raise ${minRaise}
+                          </button>
+                        )}
+                        
+                        {quickBetAmounts.map(amount => {
+                          const isDisabled = amount > currentPlayer.balance || amount < minRaise;
+                          return (
+                            <button
+                              key={amount}
+                              onClick={() => setCustomBetAmount(amount.toString())}
+                              disabled={isDisabled}
+                              className={`px-3 py-1 rounded text-sm font-semibold ${
+                                isDisabled 
+                                  ? 'bg-gray-600 text-gray-400 cursor-not-allowed' 
+                                  : 'bg-yellow-600 hover:bg-yellow-700 text-white'
+                              }`}
+                            >
+                              ${amount}
+                            </button>
+                          );
+                        })}
+                        
+                        {currentPlayer.balance > callAmount && (
+                          <button
+                            onClick={() => setCustomBetAmount(currentPlayer.balance.toString())}
+                            className="bg-purple-600 hover:bg-purple-700 text-white px-3 py-1 rounded text-sm font-semibold"
+                          >
+                            All-In ${currentPlayer.balance}
+                          </button>
+                        )}
+                      </div>
+                      
+                      {/* Custom Bet Input */}
+                      <div className="flex justify-center gap-2">
+                        <input
+                          type="number"
+                          inputMode="numeric"
+                          min={callAmount > 0 ? minRaise : 5}
+                          value={customBetAmount}
+                          onChange={(e) => setCustomBetAmount(e.target.value.replace(/[^0-9]/g, ''))}
+                          placeholder={callAmount > 0 ? `Min Raise: ${minRaise}` : '5'}
+                          className="bg-gray-800 text-white px-3 py-1 rounded text-sm w-32 text-center"
+                        />
+                        <button
+                          onClick={handleCustomBet}
+                          disabled={
+                            !customBetAmount ||
+                            parseInt(customBetAmount) < (callAmount > 0 ? minRaise : 5) ||
+                            parseInt(customBetAmount) > currentPlayer.balance
+                          }
+                          className={`px-3 py-1 rounded text-sm ${
+                            !customBetAmount ||
+                            parseInt(customBetAmount) < (callAmount > 0 ? minRaise : 5) ||
+                            parseInt(customBetAmount) > currentPlayer.balance
+                              ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
+                              : 'bg-yellow-600 hover:bg-yellow-700 text-white'
+                          }`}
+                        >
+                          {callAmount > 0 ? 'Raise' : 'Bet'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Action Buttons */}
+                  <div className="flex justify-center gap-3">
+                    {actionOptions?.map(option => (
+                      <button
+                        key={option.action}
+                        onClick={() => handleAction(option.action)}
+                        className={`${option.className} text-white px-6 py-2 rounded-lg font-bold transition-colors`}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )
             )}
-
-            {/* Action Buttons */}
-            <div className="flex justify-center gap-3">
-              {actionOptions.map(option => (
-                <button
-                  key={option.action}
-                  onClick={() => handleAction(option.action)}
-                  className={`${option.className} text-white px-6 py-2 rounded-lg font-bold transition-colors`}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Showdown - Fixed Height to Match Controls */}
-        {gamePhase === 'showdown' && (
-          <div className="h-[50dvh] bg-gray-900 p-3 flex-shrink-0 flex flex-col justify-center">
-            <div className="text-center mb-4">
-              <h3 className="text-lg font-bold text-white flex items-center justify-center gap-2 mb-2">
-                <Trophy className="text-yellow-400 w-5 h-5" />
-                Select the Winner
-              </h3>
-              <p className="text-gray-300 text-sm">Total Pot: <span className="text-green-400 font-bold">${currentPot}</span></p>
-              <p className="text-gray-400 text-xs mt-1">Click on the player who won the hand or choose tie</p>
-            </div>
-            
-            <div className="flex justify-center gap-3 flex-wrap">
-              {activePlayers.map(player => (
-                <button
-                  key={player.id}
-                  onClick={() => awardPot(player.id)}
-                  className="bg-yellow-500 hover:bg-yellow-600 text-black px-6 py-2 rounded-lg font-bold transition-colors"
-                >
-                  {player.name} WINS
-                </button>
-              ))}
-              
-              {activePlayers.length >= 2 && (
-                <button
-                  onClick={splitPot}
-                  className="bg-yellow-500 hover:bg-yellow-600 text-black px-6 py-2 rounded-lg font-bold transition-colors"
-                >
-                  TIE - SPLIT POT
-                </button>
-              )}
-            </div>
-          </div>
+          </>
         )}
       </div>
     </div>
